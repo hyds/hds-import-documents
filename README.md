@@ -12,7 +12,7 @@ Define your documents naming convention as follows:
 
 ## Parameter screen
 
-![Parameter screen](/images/psc.PNG)
+![Parameter screen](/images/psc.png)
 
 ## INI configuration
 
