@@ -1,4 +1,4 @@
-has-import-documents
+hds-import-documents
 =====================
 
 This HYSCRIPT imports documents into the Hydstra documents tree following a standard document naming convention.
