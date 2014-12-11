@@ -18,6 +18,12 @@ OUT     = +0   +1 INPUT   CHAR       10  0  FALSE   FALSE  0.0 0.0 'S' $OP
 
 [Perl]
 
+[Todo]
+* if site not registered throw email error
+* if date unlikely throw email error
+* can we recognise file type (e.g. logger file, and then import with PROLOG?
+* If not then send to html error rerpot which gets sent to the nomiated user.
+
 =cut
 
 
@@ -81,7 +87,8 @@ use warnings;
 use Data::Dumper;
 use FileHandle; 
 use DateTime;
-#use Time::localtime;
+use Time::localtime;
+
 use Env;
 use File::Copy;
 use File::stat;
@@ -92,23 +99,26 @@ use Cwd;
 
 use FindBin qw($Bin);
 
-#Hydrological Administration Services Modules
-use local::lib "$Bin/HAS/";
-use Export::dbf;
-#use Existence::Site;
+## Kisters modules
+use HyTSFile;
+
+## Kisters libraries
+require 'hydlib.pl';
+require 'hydtim.pl';
+
+## HDS Modules
+#use local::lib "$Bin/HDS/";
+use local::lib "C:/Hydstra/hyd/dat/ini/HDS/";
+#use Export::dbf;
 use Hydstra;
 use Import;
 use Import::fs;
 use Import::History;
 
-#Hydstra modules
-#use HydDLLp;
+  
 
-#Hydstra libraries
-require 'hydlib.pl';
-require 'hydtim.pl';
 
-#Globals
+## Globals
 my $prt_fail = '-P';
 
 
@@ -116,18 +126,29 @@ main: {
   
   my ($dll,$use_hydbutil,%ini,%temp,%errors);
   
-  #Gather parameters and config
-  my $script     = lc(FileName($0));
-  IniHash($ARGV[0],\%ini, 0, 0);
-  IniHash($script.'.ini',\%ini, 0 ,0);
+  
+  
+  
   
   #Get config values
+  my $inipath       = HyconfigValue('INIPATH');
   my $temp          = HyconfigValue('TEMPPATH');
   my $junk          = HyconfigValue('JUNKPATH').'documents\\';
   my $docpath       = HyconfigValue('DOCPATH');
   my $quarantine    = $temp.'\\quarantine_documents\\';
+  my $workarea = 'priv.histupd';
+  my $hdspath = $inipath.'HDS\\';
   MkDir($quarantine);
   MkDir($junk);
+  
+  #Gather parameters and config
+  my $script     = lc(FileName($0));
+  Prt('-P',"Script [$script] hdspath [$hdspath]\n");
+  
+  IniHash($ARGV[0],\%ini, 0, 0);
+  IniHash($hdspath.$script.'.ini',\%ini, 0 ,0);
+  
+  
   
   #Gather parameters
   my %photo_types   = %{$ini{'photo_types'}};
@@ -135,29 +156,27 @@ main: {
   my $import_dir    = $ini{perl_parameters}{dir};  
   #my $reportfile    = $ini{perl_parameters}{out};  
   my $reportfile    = $junk."output.txt";  
+  my $printfile    = $junk."printfile.txt";  
   my $nowdat = substr (NowString(),0,8); #YYYYMMDDHHIIEE to YYYYMMDD for default import date
   my $nowtim = substr (NowString(),8,4); #YYYYMMDDHHIIEE to HHII for default import time
-  my $fs = Import::fs->new();
-
   
-  try{
-    $dll=HydDllp->New();
-  }
-  catch{
-    Prt($prt_fail,NowStr().": *** ERROR An error occured while initialising HYDDLLP\n");
-    $use_hydbutil=1;
-    
-  };
-  #Prt($prt_fail,NowStr().": docpath [$docpath] import_dir [$import_dir] photo_types []\n"); #.Dumper(%photo_types)."]\n");
-
+  my $fs = Import::fs->new();
+  my $ts=HyTSFile->New();  #initialise object 
+  
   my @files = $fs->FList($import_dir,'*');
   shift @files;
-  if ( $#files < 1 ) {
-    Prt('-P',"no files");
+  
+  Prt('-P',"files [".HashDump(\@files)."]");
+
+  PrintAndRun('-S',qq(HYDBUTIL DELETE [$workarea]history "$printfile" /FASTMODE) );
+  
+  open my $io, ">>", $reportfile;
+  if ( $#files < 0 ) {
+    Prt('-X',"no files");
   }
   else{
     foreach ( @files ) {
-      #open my $fh, "<:encoding(utf8)", $_;
+
       my @file_dir = split(/\//,$_);
       my $file_name = $file_dir[$#file_dir];
       $file_name =~ s{( |-|~)}{_}gi;
@@ -166,38 +185,23 @@ main: {
       my $site = $file_components[0]; 
       my $date = $file_components[1]; 
       
-      my $siteref = $dll->JSonCall({
-          'function' => 'get_db_info',
-          'version' => 3,
-          'params' => {
-              'table_name'  => 'site',
-              'field_list'  => ['station', 'stname'],
-              'sitelist_filter' => $site,
-              'return_type' => 'hash'
-          }
-      }, 1000000);
-      
-      
       my $valid = 1;
       my $reason = '';
-      if ( ! defined ( $siteref->{return} )){
-        Prt('-P',"Not Defined [".HashDump($siteref)."]"); 
-        $valid = 0;
-        $reason = "Site [$site] not registered in SITE table. Please register in table and re-import the documents";
-        
-      }
-      else{
-        my $stname = $siteref->{return}->{rows}->{$site}->{stname};
-        
-      }
-   
-      
       my $destination;
-      if ( ! $valid ){
+      
+      if ( ! ( $ts->ValidSite($site)) ){
+        print "*** ERROR - [$site] is not valid naming convention\n";
         $destination = $quarantine.$file_name;
-        $errors{invalid}{$site}{filename} = $destination;
-        $errors{invalid}{$site}{reason} = $reason;
+        $errors{invalid}{$site}{filename} = $file_name;
+        $errors{invalid}{$site}{reason} = "not valid naming convention";
+        next;
       }
+      elsif ( ! ( $ts->SiteExists($site)) ){
+        print "*** ERROR - [$site] does not exist in site table\n";
+        $errors{invalid}{$site}{filename} = $file_name;
+        $errors{invalid}{$site}{reason} = "does not exist in site table";
+        next;
+      }    
       else{
         my $site_docpath = $docpath.'SITE\\'.$site.'\\';
         MkDir( $site_docpath );
@@ -206,28 +210,21 @@ main: {
         $temp{$site}{file_path}{$destination}++;
       }
       
-      #if site not registered throw email error
-      #if date unlikely throw email error
-      #can we recognise file type (e.g. logger file, and then import with PROLOG?
-      #If not then send to html error rerpot which gets sent to the nomiated user.
-  
       if ( copy( $_, $destination ) ) {
         print NowStr()."   - Saved to [$destination]\n";  
       }
       else {
         Prt($prt_fail,NowStr() . "   *** ERROR - Copy [$_] Failed\n" );
+        $errors{copy_fail}{$site}{files}{$_}++;
       }
-     
     }
+    
+    $ts->Close;                                                    #close the object 
+
     unlink (@files);  
     
     if ( defined ( $errors{invalid} )){
-      open my $io, ">>", $reportfile;
-      
       print $io "IMPORT DOCUMENTS ERROR REPORT\n";
-      
-      
-      
     }
     else{
       my %hist = ();
@@ -242,6 +239,7 @@ main: {
         $hist{$site.'doc'}{KEYWORD}      = 'DOCUMENTS';
         $hist{$site.'doc'}{STATION}      = $site;
         
+=skip        
         my %descript = ();
         foreach my $file ( keys %{$temp{$site}{file_path}} ){
           next if ( ! $image->image_file($file) );
@@ -259,29 +257,47 @@ main: {
         $hist{$site.'base64'}{STATTIME}     = $nowtim;
         $hist{$site.'base64'}{KEYWORD}      = 'BASE64';
         $hist{$site.'base64'}{STATION}      = $site;
+=cut      
       }  
       
       my $rep = 'C:\\temp\\history_report.txt';
       
       my %params;
       my $history = Import::History->new();
-      $history->update({'history'=>\%hist,'params'=>\%params});
+      $history->update({'workarea'=>$workarea,'history'=>\%hist,'params'=>\%params});
     }  
     
-    close ($reportfile);
     
   }    
+  close ($reportfile);
+  
+  my $wk = '['.$workarea.']history';
+  Prt('-P',"wk [$wk]");
+  PrintAndRun('-S',qq(HYDBUTIL APPEND HISTORY $wk TABLE YES "$printfile" /FASTMODE) ) ;
+  
+  try {
+  }
+  catch {
+    print "error updating HISTORY";
+    Prt('-P',"hello world");
+    
+  }
+    
+  
   
   #Archive work area
   #PrintAndRun(HYDBUTIL DELETE history [PUB.$workarea]history "$rep" /FASTMODE);
   
   #Email any issues to the nominated users
+  #copied files
+  #SITE | FROM | TO | STATUS
+  #--------------------------
+  # 220110  | C:\temp\user\smaud\file.pdf| documents\SITE\ | success
+  # 220110A |
   
-  
-  #update_history(\%history); 
   #error_report = create_error_report(\%errors); 
-  #send_errors($error_report); 
-  #zd
+  #send_report($error_report); 
+  #zd d
   
 }
 
