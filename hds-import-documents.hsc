@@ -104,7 +104,6 @@ use HyTSFile;
 
 ## Kisters libraries
 require 'hydlib.pl';
-require 'hydtim.pl';
 
 ## HDS Modules
 #use local::lib "$Bin/HDS/";
@@ -135,39 +134,35 @@ main: {
   my $temp          = HyconfigValue('TEMPPATH');
   my $junk          = HyconfigValue('JUNKPATH').'documents\\';
   my $docpath       = HyconfigValue('DOCPATH');
-  my $quarantine    = $temp.'\\quarantine_documents\\';
   my $workarea = 'priv.histupd';
   my $hdspath = $inipath.'HDS\\';
-  MkDir($quarantine);
   MkDir($junk);
   
-  #Gather parameters and config
+  #Import config
   my $script     = lc(FileName($0));
-  Prt('-P',"Script [$script] hdspath [$hdspath]\n");
-  
   IniHash($ARGV[0],\%ini, 0, 0);
   IniHash($hdspath.$script.'.ini',\%ini, 0 ,0);
-  
-  
   
   #Gather parameters
   my %photo_types   = %{$ini{'photo_types'}};
   my %emails        = %{$ini{'email_setup'}};
   my $import_dir    = $ini{perl_parameters}{dir};  
+  my $quarantine    = $import_dir.'quarantine_documents\\';
   #my $reportfile    = $ini{perl_parameters}{out};  
   my $reportfile    = $junk."output.txt";  
   my $printfile    = $junk."printfile.txt";  
-  my $nowdat = substr (NowString(),0,8); #YYYYMMDDHHIIEE to YYYYMMDD for default import date
-  my $nowtim = substr (NowString(),8,4); #YYYYMMDDHHIIEE to HHII for default import time
+  
+  my $dt = DateTime->now(time_zone => 'local');
+  my $nowdat = $dt->ymd(''); 
+  my $nowtim = $dt->hms('');
+  $nowtim = substr ($nowtim,0,4); 
   
   my $fs = Import::fs->new();
-  my $ts=HyTSFile->New();  #initialise object 
+  my $ts = HyTSFile->New();  #initialise object 
   
   my @files = $fs->FList($import_dir,'*');
   shift @files;
   
-  Prt('-P',"files [".HashDump(\@files)."]");
-
   PrintAndRun('-S',qq(HYDBUTIL DELETE [$workarea]history "$printfile" /FASTMODE) );
   
   open my $io, ">>", $reportfile;
@@ -179,10 +174,11 @@ main: {
 
       my @file_dir = split(/\//,$_);
       my $file_name = $file_dir[$#file_dir];
+      next if lc($file_name) eq 'quarantine_documents';
       $file_name =~ s{( |-|~)}{_}gi;
       
       my @file_components = split(/_/,$file_name);
-      my $site = $file_components[0]; 
+      my $site = uc($file_components[0]); 
       my $date = $file_components[1]; 
       
       my $valid = 1;
@@ -191,16 +187,19 @@ main: {
       
       if ( ! ( $ts->ValidSite($site)) ){
         print "*** ERROR - [$site] is not valid naming convention\n";
+        
+        MkDir($quarantine);
         $destination = $quarantine.$file_name;
         $errors{invalid}{$site}{filename} = $file_name;
-        $errors{invalid}{$site}{reason} = "not valid naming convention";
-        next;
+        $errors{invalid}{$site}{reason} = "Not valid naming convention. Quarantined in [$destination]. Please correct the STATION ID and re-import file";
       }
       elsif ( ! ( $ts->SiteExists($site)) ){
         print "*** ERROR - [$site] does not exist in site table\n";
+        
+        MkDir($quarantine);
+        $destination = $quarantine.$file_name;
         $errors{invalid}{$site}{filename} = $file_name;
-        $errors{invalid}{$site}{reason} = "does not exist in site table";
-        next;
+        $errors{invalid}{$site}{reason} = "Site does not exist in site table. Quarantined in [$destination]. Please correct the STATION ID and re-import file";
       }    
       else{
         my $site_docpath = $docpath.'SITE\\'.$site.'\\';
@@ -214,7 +213,7 @@ main: {
         print NowStr()."   - Saved to [$destination]\n";  
       }
       else {
-        Prt($prt_fail,NowStr() . "   *** ERROR - Copy [$_] Failed\n" );
+        print "   *** ERROR - Copy [$_] Failed\n";
         $errors{copy_fail}{$site}{files}{$_}++;
       }
     }
@@ -272,15 +271,13 @@ main: {
   close ($reportfile);
   
   my $wk = '['.$workarea.']history';
-  Prt('-P',"wk [$wk]");
   PrintAndRun('-S',qq(HYDBUTIL APPEND HISTORY $wk TABLE YES "$printfile" /FASTMODE) ) ;
+  PrintAndRun('-S',qq(HYDBUTIL DELETE [$workarea]history "$printfile" /FASTMODE) );
   
   try {
   }
   catch {
     print "error updating HISTORY";
-    Prt('-P',"hello world");
-    
   }
     
   
